@@ -18,6 +18,8 @@ Functions:
   FindOrbits(data)                   braid and topological class of each vector
   OrbitsFromIds(ids)                 class ids -> list of orbits
   PrintOrbits(data, brd, top)        print / write the result
+  PrintBraidClasses(data, brd)       vectors grouped by braid class
+  PrintTopologicalClasses(data, top) vectors grouped by topological class
   ReadGenvectorFile(filename)        read a file written by AddMonodromy
   OrbitsFromFile(infile, outfile)    FindOrbits on every family in a file
 
@@ -409,6 +411,65 @@ PrintOrbits := procedure(data, brd, top : file := "", label := "")
          PrintFile(file, l);
       end if;
    end for;
+end procedure;
+
+
+
+/* ***************************************
+PrintBraidClasses(data, brd)
+PrintTopologicalClasses(data, top)
+
+Print the generating vectors grouped by braid (resp. topological) class.
+Each class is named by the smallest index of a vector in it, as in the ids
+returned by FindOrbits.  For PrintTopologicalClasses, passing brd := brd
+also shows the braid class of each vector and groups the vectors of each
+topological class by braid class.
+
+Optional:
+   file   append the output to this file instead of printing it
+   label  name of the group for the header line (default: its order)
+************************************ */
+
+PrintClasses := procedure(data, ids, name : brd := [], file := "", label := "")
+   G := data[1]`Gro;
+   orbs := OrbitsFromIds(ids);
+   if label eq "" then
+      label := "Group of order " cat IntegerToString(#G);
+   end if;
+   lines := [ Sprintf("# %o, signature %o: %o vectors in %o %o classes",
+                      label, data[1]`signature, #data, #orbs, name) ];
+   for o in orbs do
+      orb := o;
+      if #brd gt 0 then
+         Sort(~orb, func< a, b | brd[a] ne brd[b] select brd[a] - brd[b] else a - b >);
+      end if;
+      Append(~lines, "");
+      Append(~lines, Sprintf("%o class %o (%o vector%o)", ToUpper(name[1]) cat name[2..#name], ids[orb[1]], #orb,
+                             #orb eq 1 select "" else "s"));
+      for k in orb do
+         Append(~lines, Sprintf("  [%o] Con %o%o", k, data[k]`Con,
+                                #brd gt 0 select Sprintf("  braid class %o", brd[k]) else ""));
+         v := data[k]`genimages;
+         Append(~lines, "      " cat &cat[ Sprint(v[i]) cat (i lt #v select ", " else "") : i in [1..#v] ]);
+      end for;
+   end for;
+   for l in lines do
+      if file eq "" then
+         print l;
+      else
+         PrintFile(file, l);
+      end if;
+   end for;
+end procedure;
+
+
+PrintBraidClasses := procedure(data, brd : file := "", label := "")
+   PrintClasses(data, brd, "braid" : file := file, label := label);
+end procedure;
+
+
+PrintTopologicalClasses := procedure(data, top : brd := [], file := "", label := "")
+   PrintClasses(data, top, "topological" : brd := brd, file := file, label := label);
 end procedure;
 
 

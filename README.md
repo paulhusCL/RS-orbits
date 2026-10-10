@@ -17,6 +17,16 @@ PrintOrbits(data, brd, top);
 `brd[k]` (resp. `top[k]`) is the smallest index of a vector in the braid (resp. topological)
 class of `data[k]`. `OrbitsFromIds(brd)` turns these into a list of classes.
 
+To list the generating vectors grouped by class:
+
+```
+PrintBraidClasses(data, brd : label := "PSL(2,7)");
+PrintTopologicalClasses(data, top : brd := brd, label := "PSL(2,7)");
+```
+
+Both take `file := "name"` to write to a file instead. Passing `brd` to
+`PrintTopologicalClasses` also shows each vector's braid class.
+
 Files written by `AddMonodromy` in genvectors.mag can be processed directly:
 
 ```
