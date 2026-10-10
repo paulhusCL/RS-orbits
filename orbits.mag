@@ -1,0 +1,451 @@
+/* orbits.mag
+
+Compute braid and topological equivalence classes of group actions on
+Riemann surfaces, starting from the generating vectors produced by
+RepresentativesEpimorphisms in genvectors.mag
+(https://github.com/jenpaulhus/breuer-modified).
+
+Only quotient genus 0 is supported: for g0 > 0, RepresentativesEpimorphisms
+does not return a complete list of vectors up to simultaneous conjugation,
+so the orbits would not be meaningful.
+
+Equivalences (signature [0, m_1, ..., m_r] with m_1 <= ... <= m_r):
+  braid        orbits of the braid group elements that preserve the
+               signature (cone points of equal order may be permuted)
+  topological  orbits of Aut(G) x (braid group above)
+
+Functions:
+  FindOrbits(data)                   braid and topological class of each vector
+  OrbitsFromIds(ids)                 class ids -> list of orbits
+  PrintOrbits(data, brd, top)        print / write the result
+  ReadGenvectorFile(filename)        read a file written by AddMonodromy
+  OrbitsFromFile(infile, outfile)    FindOrbits on every family in a file
+
+Typical use:
+  load "genvectors.mag";
+  load "orbits.mag";
+  data := RepresentativesEpimorphisms([0,2,3,7], PSL(2,7));
+  brd, top := FindOrbits(data);
+  PrintOrbits(data, brd, top);
+
+*/
+
+
+ReFo := recformat< signature, Con, Gro, genimages >;   // same as genvectors.mag
+
+
+
+/* ***************************************
+Hurwitz moves on a generating vector v = [c_1, ..., c_r] with c_1*...*c_r = 1.
+
+  sigma_i    : (.., a, b, ..) -> (.., a*b*a^-1, a, ..)
+  sigma_i^-1 : (.., a, b, ..) -> (.., b, b^-1*a*b, ..)
+
+A braid word is a sequence of nonzero integers: i means sigma_i and
+-i means sigma_i^-1, applied left to right.
+************************************ */
+
+ApplyBraidWord := function(v, word)
+   for s in word do
+      i := Abs(s);
+      a := v[i];
+      b := v[i+1];
+      if s gt 0 then
+         v[i] := a*b*a^-1;
+         v[i+1] := a;
+      else
+         v[i] := b;
+         v[i+1] := b^-1*a*b;
+      end if;
+   end for;
+   return v;
+end function;
+
+
+
+/* ***************************************
+SignatureBraidWords(m)
+
+Input:  m  the branching orders [m_1, ..., m_r]
+
+Output: braid words generating the subgroup of the braid group B_r that
+        maps a vector with orders m to a vector with orders m:
+          sigma_i  when m_i = m_{i+1}, and
+          A_ij = sigma_{j-1}^-1 ... sigma_{i+1}^-1 sigma_i^2 sigma_{i+1} ... sigma_{j-1}
+               when i < j are in different blocks of equal orders.
+        The A_ij generate the pure braid group, and the sigma_i generate
+        the permutations of each block.
+************************************ */
+
+SignatureBraidWords := function(m)
+   r := #m;
+   words := [ [i] : i in [1..r-1] | m[i] eq m[i+1] ];
+   for i in [1..r-1] do
+      for j in [i+1..r] do
+         if #{ m[k] : k in [i..j] } gt 1 then
+            Append(~words, [ -k : k in [j-1..i+1 by -1] ] cat [i, i] cat [ k : k in [i+1..j-1] ]);
+         end if;
+      end for;
+   end for;
+   return words;
+end function;
+
+
+
+/* ***************************************
+Canonical form up to simultaneous conjugation.
+
+The canonical representative of v is found greedily: conjugate v[1] to the
+element of smallest index in its H-class (H = G), then replace H by the
+centralizer of that element and continue with v[2], and so on.  Once H is
+the center of G nothing more can change.
+
+The key is the sequence of indices (in the indexed set S`E of elements of
+G) of the canonical representative.  S caches the centralizers and the
+minimal conjugates already computed.
+************************************ */
+
+CanonFormat := recformat< G, E, zsize, cent, mincon >;
+
+NewCanonState := function(G)
+   S := rec< CanonFormat | G := G, E := {@ g : g in G @}, zsize := #Center(G),
+                            cent := AssociativeArray(PowerSequence(Integers())),
+                            mincon := AssociativeArray(PowerSequence(Integers())) >;
+   S`cent[[Integers()|]] := G;
+   return S;
+end function;
+
+
+CanonicalKey := procedure(v, ~S, ~key)
+   key := [Integers()|];
+   H := S`G;
+   for i in [1..#v] do
+      if #H eq S`zsize then
+         key cat:= [ Index(S`E, v[j]) : j in [i..#v] ];
+         return;
+      end if;
+
+      ck := key cat [Index(S`E, v[i])];
+      if not IsDefined(S`mincon, ck) then
+         idx := Min([ Index(S`E, y) : y in v[i]^H ]);
+         _, h := IsConjugate(H, v[i], S`E[idx]);
+         S`mincon[ck] := < idx, h >;
+      end if;
+      idx, h := Explode(S`mincon[ck]);
+
+      v := [ y^h : y in v ];     // h centralizes v[1..i-1]
+      Append(~key, idx);
+
+      if not IsDefined(S`cent, key) then
+         S`cent[key] := Centralizer(H, S`E[idx]);
+      end if;
+      H := S`cent[key];
+   end for;
+end procedure;
+
+
+
+/* ***************************************
+FindOrbits(data)
+
+Input:  data  the output of RepresentativesEpimorphisms(signature, G) for a
+              signature with quotient genus 0: a sequence of records with
+              fields signature, Con, Gro, genimages.
+
+Optional:
+        Topological  set to false to compute only the braid classes
+        Check        set to false to skip the consistency checks on the data
+
+Output: brd, top  sequences with brd[k] (resp. top[k]) the smallest index of
+                  a vector in the braid (resp. topological) class of data[k]
+************************************ */
+
+FindOrbits := function(data : Topological := true, Check := true)
+
+n := #data;
+error if n eq 0, "FindOrbits: no generating vectors";
+G := data[1]`Gro;
+sig := data[1]`signature;
+error if sig[1] ne 0, "FindOrbits: only quotient genus 0 is supported";
+error if exists{ d : d in data | d`signature ne sig or d`Gro cmpne G },
+      "FindOrbits: all records must have the same group and signature";
+
+if n eq 1 then
+   return [1], [1];
+end if;
+
+m := sig[2..#sig];
+r := #m;
+cm := ClassMap(G);
+
+// blocks of positions with equal branching order
+blocks := [];
+for i in [1..r] do
+   if i gt 1 and m[i] eq m[i-1] then
+      Append(~blocks[#blocks], i);
+   else
+      Append(~blocks, [i]);
+   end if;
+end for;
+
+// The multiset of classes in each block is a braid invariant
+ClassTuple := func< v | [ cm(x) : x in v ] >;
+MultisetKey := function(v)
+   c := ClassTuple(v);
+   return &cat[ Sort([ c[i] : i in B ]) : B in blocks ];
+end function;
+
+msData := AssociativeArray(PowerSequence(Integers()));     // multiset key -> indices of data with that multiset
+msTuples := AssociativeArray(PowerSequence(Integers()));   // multiset key -> class tuples occurring in data
+msOf := [];
+for k in [1..n] do
+   ms := MultisetKey(data[k]`genimages);
+   Append(~msOf, ms);
+   if IsDefined(msData, ms) then
+      Append(~msData[ms], k);
+      Include(~msTuples[ms], ClassTuple(data[k]`genimages));
+   else
+      msData[ms] := [k];
+      msTuples[ms] := { ClassTuple(data[k]`genimages) };
+   end if;
+end for;
+
+S := NewCanonState(G);
+words := SignatureBraidWords(m);
+
+// canonical keys of the vectors sharing their class multiset with another
+keyToData := AssociativeArray(PowerSequence(Integers()));
+dataKey := [ [Integers()|] : k in [1..n] ];
+for k in [1..n] do
+   if #msData[msOf[k]] gt 1 then
+      CanonicalKey(data[k]`genimages, ~S, ~key);
+      dataKey[k] := key;
+      if Check and IsDefined(keyToData, key) then
+         printf "WARNING: vectors %o and %o are simultaneously conjugate\n", keyToData[key], k;
+      end if;
+      keyToData[key] := k;
+   end if;
+end for;
+
+
+/* Braid classes.  Vectors whose class multiset is shared by no other vector
+   are alone in their braid class.  Otherwise breadth-first search the braid
+   orbit through all conjugacy classes of generating vectors with the right
+   orders; orbitOf maps each canonical key seen to the index of the first data
+   vector of its orbit, which is the smallest. */
+
+brd := [1..n];
+warned := false;
+orbitOf := AssociativeArray(PowerSequence(Integers()));
+for k in [1..n] do
+   if #msData[msOf[k]] eq 1 then
+      continue;
+   end if;
+   if IsDefined(orbitOf, dataKey[k]) then
+      brd[k] := orbitOf[dataKey[k]];
+      continue;
+   end if;
+
+   orbitOf[dataKey[k]] := k;
+   queue := [ data[k]`genimages ];
+   pos := 1;
+   while pos le #queue do
+      v := queue[pos];
+      pos +:= 1;
+      for w in words do
+         u := ApplyBraidWord(v, w);
+         CanonicalKey(u, ~S, ~key);
+         if not IsDefined(orbitOf, key) then
+            orbitOf[key] := k;
+            Append(~queue, u);
+            if Check and not warned and ClassTuple(u) in msTuples[msOf[k]]
+                     and not IsDefined(keyToData, key) then
+               print "WARNING: data is incomplete; found a vector not in the list";
+               warned := true;
+            end if;
+         end if;
+      end for;
+   end while;
+end for;
+
+if not Topological then
+   return brd, brd;
+end if;
+
+
+/* Topological classes.  Aut(G) commutes with the braid action, so it permutes
+   braid classes; union the classes along the outer automorphism generators. */
+
+A := AutomorphismGroup(G);
+outer := [ A.i : i in [1..Ngens(A)] | not IsInner(A.i) ];
+
+parent := [1..n];
+Find := function(parent, x)
+   while parent[x] ne x do
+      x := parent[x];
+   end while;
+   return x;
+end function;
+
+for k in [ k : k in [1..n] | brd[k] eq k ] do
+   for alpha in outer do
+      // braid class of the image of data[k] under alpha
+      u := [ alpha(x) : x in data[k]`genimages ];
+      ms := MultisetKey(u);
+      error if not IsDefined(msData, ms), "FindOrbits: data is incomplete (missing class structure)";
+      if #msData[ms] eq 1 then
+         j := msData[ms][1];
+      else
+         CanonicalKey(u, ~S, ~key);
+         error if not IsDefined(orbitOf, key), "FindOrbits: data is incomplete (missing vector)";
+         j := orbitOf[key];
+      end if;
+
+      a := Find(parent, k);
+      b := Find(parent, j);
+      if a ne b then
+         parent[Max(a,b)] := Min(a,b);
+      end if;
+   end for;
+end for;
+
+top := [ Find(parent, brd[k]) : k in [1..n] ];
+return brd, top;
+
+end function;
+
+
+
+/* ***************************************
+OrbitsFromIds(ids)
+
+Input:  ids  a sequence as returned by FindOrbits
+
+Output: the classes as a sequence of sequences of indices
+************************************ */
+
+OrbitsFromIds := function(ids)
+   return [ [ k : k in [1..#ids] | ids[k] eq i ] : i in Sort(SetToSequence(Set(ids))) ];
+end function;
+
+
+
+/* ***************************************
+PrintOrbits(data, brd, top)
+
+Prints, for each generating vector, its class structure and the ids of its
+braid and topological classes.  With file := "name" the output is appended
+to that file instead; label is printed as a header line.
+************************************ */
+
+PrintOrbits := procedure(data, brd, top : file := "", label := "")
+   lines := [];
+   if label ne "" then
+      Append(~lines, "# " cat label);
+   end if;
+   for k in [1..#data] do
+      Append(~lines, Sprintf("%o: Con %o  braid %o  topological %o",
+                             k, data[k]`Con, brd[k], top[k]));
+   end for;
+   for l in lines do
+      if file eq "" then
+         print l;
+      else
+         PrintFile(file, l);
+      end if;
+   end for;
+end procedure;
+
+
+
+/* ***************************************
+ReadGenvectorFile(filename)
+
+Reads a file written by AddMonodromy in genvectors.mag.  Each entry there is
+
+   (order,number)
+   signature
+   class structure
+   one line per permutation in the generating vector
+   *
+
+Consecutive entries with the same group and signature form one family.
+The permutation group of a family is rebuilt as the group generated by its
+vectors, so the class numbering may differ from the one in the file; the
+Con field is recomputed.  Entries with no branching (signature [g0]) and
+families with g0 > 0 are skipped.
+
+Output: a sequence of families, each a sequence of records in the format of
+        RepresentativesEpimorphisms, and a parallel sequence of labels
+        "(order,number) signature"
+************************************ */
+
+ReadGenvectorFile := function(filename)
+
+FP := Open(filename, "r");
+entries := [];      // < groupstring, signature, list of permutations as sequences >
+lines := [];
+while true do
+   l := Gets(FP);
+   if IsEof(l) then
+      break;
+   end if;
+   l := &cat[ c : c in Eltseq(l) | c ne "\r" ];
+   if l eq "" then
+      continue;
+   end if;
+   if l eq "*" then
+      if #lines ge 3 then
+         Append(~entries, < lines[1], eval lines[2],
+                            [ StringToIntegerSequence(p) : p in lines[4..#lines] ] >);
+      end if;
+      lines := [];
+   else
+      Append(~lines, l);
+   end if;
+end while;
+delete FP;
+
+families := [];
+labels := [];
+i := 1;
+while i le #entries do
+   j := i;
+   while j lt #entries and entries[j+1][1] eq entries[i][1] and entries[j+1][2] eq entries[i][2] do
+      j +:= 1;
+   end while;
+   sig := entries[i][2];
+   if #sig gt 1 and sig[1] eq 0 and #entries[i][3] gt 0 then
+      deg := #entries[i][3][1];
+      Sd := Sym(deg);
+      vecs := [ [ Sd!p : p in entries[k][3] ] : k in [i..j] ];
+      G := sub< Sd | &cat vecs >;
+      cm := ClassMap(G);
+      Append(~families, [ rec< ReFo | signature := sig, Gro := G,
+                                      genimages := [ G!x : x in v ],
+                                      Con := [ cm(x) : x in v ] > : v in vecs ]);
+      Append(~labels, entries[i][1] cat " " cat Sprint(sig));
+   end if;
+   i := j + 1;
+end while;
+
+return families, labels;
+
+end function;
+
+
+
+/* ***************************************
+OrbitsFromFile(infile, outfile)
+
+Runs FindOrbits on every family in a file written by AddMonodromy and
+appends the results to outfile with PrintOrbits.
+************************************ */
+
+OrbitsFromFile := procedure(infile, outfile)
+   families, labels := ReadGenvectorFile(infile);
+   for f in [1..#families] do
+      brd, top := FindOrbits(families[f]);
+      PrintOrbits(families[f], brd, top : file := outfile, label := labels[f]);
+   end for;
+end procedure;
