@@ -93,54 +93,104 @@ end function;
 
 
 /* ***************************************
-Canonical form up to simultaneous conjugation.
+Lookup of generating vectors up to simultaneous conjugation.
 
-The canonical representative of v is found greedily: conjugate v[1] to the
-element of smallest index in its H-class (H = G), then replace H by the
-centralizer of that element and continue with v[2], and so on.  Once H is
-the center of G nothing more can change.
+Nothing here lists the elements of G or of a conjugacy class, so it works
+for large permutation groups.
 
-The key is the sequence of indices (in the indexed set S`E of elements of
-G) of the canonical representative.  S caches the centralizers and the
-minimal conjugates already computed.
+  NormalizeVector  conjugates v so that v[1] is the fixed representative of
+                   its conjugacy class (from ConjugacyClasses(G))
+  Invariant        classes of the entries and, for r > 3, of the products
+                   v[i]*v[j]; these do not change under simultaneous conjugation
+  IsSameClass      decides whether two normalized vectors with the same
+                   invariant are simultaneously conjugate: conjugate v[2] to
+                   w[2] inside H = C(w[1]), then v[3] to w[3] inside
+                   H meet C(w[2]), and so on.  The last entry needs no test
+                   since the product of the entries is 1.
+  LookupVector     finds a vector in a table B (an associative array from
+                   invariants to sequences of < vector, label >), optionally
+                   inserting it
+
+S holds the class map, the class representatives and a cache of the
+centralizers used by IsSameClass.
 ************************************ */
 
-CanonFormat := recformat< G, E, zsize, cent, mincon >;
+LookupFormat := recformat< G, cm, reps, zsize, cent >;
 
-NewCanonState := function(G)
-   S := rec< CanonFormat | G := G, E := {@ g : g in G @}, zsize := #Center(G),
-                            cent := AssociativeArray(PowerSequence(Integers())),
-                            mincon := AssociativeArray(PowerSequence(Integers())) >;
-   S`cent[[Integers()|]] := G;
-   return S;
+NewLookupState := function(G)
+   return rec< LookupFormat | G := G, cm := ClassMap(G),
+                              reps := [ c[3] : c in ConjugacyClasses(G) ],
+                              zsize := #Center(G),
+                              cent := AssociativeArray(PowerSequence(G)) >;
 end function;
 
 
-CanonicalKey := procedure(v, ~S, ~key)
-   key := [Integers()|];
-   H := S`G;
-   for i in [1..#v] do
+NormalizeVector := procedure(~v, ~S)
+   x := S`reps[S`cm(v[1])];
+   _, g := IsConjugate(S`G, v[1], x);
+   v := [ y^g : y in v ];
+   if not IsDefined(S`cent, [x]) then
+      S`cent[[x]] := Centralizer(S`G, x);
+   end if;
+end procedure;
+
+
+Invariant := function(v, cm)
+   r := #v;
+   inv := [ cm(x) : x in v ];
+   if r gt 3 then
+      inv cat:= &cat[ [ cm(v[i]*v[j]) : j in [i+1..r] ] : i in [1..r-1] ];
+   end if;
+   return inv;
+end function;
+
+
+IsSameClass := procedure(v, w, ~S, ~res)
+   r := #v;
+   key := [ w[1] ];
+   H := S`cent[key];
+   for i in [2..r-1] do
       if #H eq S`zsize then
-         key cat:= [ Index(S`E, v[j]) : j in [i..#v] ];
+         res := v[i..r] eq w[i..r];
          return;
       end if;
-
-      ck := key cat [Index(S`E, v[i])];
-      if not IsDefined(S`mincon, ck) then
-         idx := Min([ Index(S`E, y) : y in v[i]^H ]);
-         _, h := IsConjugate(H, v[i], S`E[idx]);
-         S`mincon[ck] := < idx, h >;
+      b, h := IsConjugate(H, v[i], w[i]);
+      if not b then
+         res := false;
+         return;
       end if;
-      idx, h := Explode(S`mincon[ck]);
-
-      v := [ y^h : y in v ];     // h centralizes v[1..i-1]
-      Append(~key, idx);
-
-      if not IsDefined(S`cent, key) then
-         S`cent[key] := Centralizer(H, S`E[idx]);
+      if i lt r-1 then
+         v := [ y^h : y in v ];
+         Append(~key, w[i]);
+         if not IsDefined(S`cent, key) then
+            S`cent[key] := Centralizer(H, w[i]);
+         end if;
+         H := S`cent[key];
       end if;
-      H := S`cent[key];
    end for;
+   res := true;
+end procedure;
+
+
+// found is the label of v in B, or 0 if v is not there; with insert := lab,
+// a vector not found is added to B with label lab
+LookupVector := procedure(v, ~B, ~S, ~found : insert := 0)
+   found := 0;
+   inv := Invariant(v, S`cm);
+   if IsDefined(B, inv) then
+      for e in B[inv] do
+         IsSameClass(v, e[1], ~S, ~res);
+         if res then
+            found := e[2];
+            return;
+         end if;
+      end for;
+      if insert ne 0 then
+         Append(~B[inv], < v, insert >);
+      end if;
+   elif insert ne 0 then
+      B[inv] := [ < v, insert > ];
+   end if;
 end procedure;
 
 
@@ -149,11 +199,12 @@ end procedure;
 FindOrbits(data)
 
 Input:  data  the output of RepresentativesEpimorphisms(signature, G) for a
-              signature with quotient genus 0: a sequence of records with
-              fields signature, Con, Gro, genimages.
+              signature [0, m_1, ..., m_r] with m_1 <= ... <= m_r: a sequence
+              of records with fields signature, Con, Gro, genimages.
 
 Optional:
-        Topological  set to false to compute only the braid classes
+        Topological  set to false to compute only the braid classes; the
+                     second return value is then a copy of the first
         Check        set to false to skip the consistency checks on the data
 
 Output: brd, top  sequences with brd[k] (resp. top[k]) the smallest index of
@@ -169,12 +220,13 @@ sig := data[1]`signature;
 error if sig[1] ne 0, "FindOrbits: only quotient genus 0 is supported";
 error if exists{ d : d in data | d`signature ne sig or d`Gro cmpne G },
       "FindOrbits: all records must have the same group and signature";
+m := sig[2..#sig];
+error if m ne Sort(m), "FindOrbits: the orders in the signature must be nondecreasing";
 
 if n eq 1 then
    return [1], [1];
 end if;
 
-m := sig[2..#sig];
 r := #m;
 cm := ClassMap(G);
 
@@ -210,20 +262,21 @@ for k in [1..n] do
    end if;
 end for;
 
-S := NewCanonState(G);
+S := NewLookupState(G);
 words := SignatureBraidWords(m);
 
-// canonical keys of the vectors sharing their class multiset with another
-keyToData := AssociativeArray(PowerSequence(Integers()));
-dataKey := [ [Integers()|] : k in [1..n] ];
+// table of the vectors sharing their class multiset with another
+dataTable := AssociativeArray(PowerSequence(Integers()));
+nd := [ d`genimages : d in data ];
 for k in [1..n] do
    if #msData[msOf[k]] gt 1 then
-      CanonicalKey(data[k]`genimages, ~S, ~key);
-      dataKey[k] := key;
-      if Check and IsDefined(keyToData, key) then
-         printf "WARNING: vectors %o and %o are simultaneously conjugate\n", keyToData[key], k;
+      v := nd[k];
+      NormalizeVector(~v, ~S);
+      nd[k] := v;
+      LookupVector(v, ~dataTable, ~S, ~j : insert := k);
+      if Check and j ne 0 then
+         printf "WARNING: vectors %o and %o are simultaneously conjugate\n", j, k;
       end if;
-      keyToData[key] := k;
    end if;
 end for;
 
@@ -231,37 +284,39 @@ end for;
 /* Braid classes.  Vectors whose class multiset is shared by no other vector
    are alone in their braid class.  Otherwise breadth-first search the braid
    orbit through all conjugacy classes of generating vectors with the right
-   orders; orbitOf maps each canonical key seen to the index of the first data
-   vector of its orbit, which is the smallest. */
+   orders.  orbitTable labels each vector seen with the index of the first
+   data vector of its orbit, which is the smallest. */
 
 brd := [1..n];
 warned := false;
-orbitOf := AssociativeArray(PowerSequence(Integers()));
+orbitTable := AssociativeArray(PowerSequence(Integers()));
 for k in [1..n] do
    if #msData[msOf[k]] eq 1 then
       continue;
    end if;
-   if IsDefined(orbitOf, dataKey[k]) then
-      brd[k] := orbitOf[dataKey[k]];
+   LookupVector(nd[k], ~orbitTable, ~S, ~j : insert := k);
+   if j ne 0 then
+      brd[k] := j;
       continue;
    end if;
 
-   orbitOf[dataKey[k]] := k;
-   queue := [ data[k]`genimages ];
+   queue := [ nd[k] ];
    pos := 1;
    while pos le #queue do
       v := queue[pos];
       pos +:= 1;
       for w in words do
          u := ApplyBraidWord(v, w);
-         CanonicalKey(u, ~S, ~key);
-         if not IsDefined(orbitOf, key) then
-            orbitOf[key] := k;
+         NormalizeVector(~u, ~S);
+         LookupVector(u, ~orbitTable, ~S, ~j : insert := k);
+         if j eq 0 then
             Append(~queue, u);
-            if Check and not warned and ClassTuple(u) in msTuples[msOf[k]]
-                     and not IsDefined(keyToData, key) then
-               print "WARNING: data is incomplete; found a vector not in the list";
-               warned := true;
+            if Check and not warned and ClassTuple(u) in msTuples[msOf[k]] then
+               LookupVector(u, ~dataTable, ~S, ~d);
+               if d eq 0 then
+                  print "WARNING: data is incomplete; found a vector not in the list";
+                  warned := true;
+               end if;
             end if;
          end if;
       end for;
@@ -296,9 +351,9 @@ for k in [ k : k in [1..n] | brd[k] eq k ] do
       if #msData[ms] eq 1 then
          j := msData[ms][1];
       else
-         CanonicalKey(u, ~S, ~key);
-         error if not IsDefined(orbitOf, key), "FindOrbits: data is incomplete (missing vector)";
-         j := orbitOf[key];
+         NormalizeVector(~u, ~S);
+         LookupVector(u, ~orbitTable, ~S, ~j);
+         error if j eq 0, "FindOrbits: data is incomplete (missing vector)";
       end if;
 
       a := Find(parent, k);
@@ -373,7 +428,8 @@ Consecutive entries with the same group and signature form one family.
 The permutation group of a family is rebuilt as the group generated by its
 vectors, so the class numbering may differ from the one in the file; the
 Con field is recomputed.  Entries with no branching (signature [g0]) and
-families with g0 > 0 are skipped.
+families with g0 > 0 are skipped.  Windows line endings and blank lines are
+accepted.
 
 Output: a sequence of families, each a sequence of records in the format of
         RepresentativesEpimorphisms, and a parallel sequence of labels
@@ -383,19 +439,19 @@ Output: a sequence of families, each a sequence of records in the format of
 ReadGenvectorFile := function(filename)
 
 FP := Open(filename, "r");
-entries := [];      // < groupstring, signature, list of permutations as sequences >
+entries := [* *];   // < groupstring, signature, list of permutations as sequences >
 lines := [];
 while true do
    l := Gets(FP);
    if IsEof(l) then
       break;
    end if;
-   l := &cat[ c : c in Eltseq(l) | c ne "\r" ];
+   l := &cat([""] cat [ c : c in Eltseq(l) | c ne CodeToString(13) ]);   // drop CR
    if l eq "" then
       continue;
    end if;
    if l eq "*" then
-      if #lines ge 3 then
+      if #lines ge 4 then     // entries with no branching have no permutations
          Append(~entries, < lines[1], eval lines[2],
                             [ StringToIntegerSequence(p) : p in lines[4..#lines] ] >);
       end if;
@@ -415,7 +471,7 @@ while i le #entries do
       j +:= 1;
    end while;
    sig := entries[i][2];
-   if #sig gt 1 and sig[1] eq 0 and #entries[i][3] gt 0 then
+   if sig[1] eq 0 then
       deg := #entries[i][3][1];
       Sd := Sym(deg);
       vecs := [ [ Sd!p : p in entries[k][3] ] : k in [i..j] ];
@@ -439,13 +495,19 @@ end function;
 OrbitsFromFile(infile, outfile)
 
 Runs FindOrbits on every family in a file written by AddMonodromy and
-appends the results to outfile with PrintOrbits.
+appends the results to outfile with PrintOrbits.  A family that raises an
+error gets an "ERROR" line in outfile and the remaining families still run.
 ************************************ */
 
 OrbitsFromFile := procedure(infile, outfile)
    families, labels := ReadGenvectorFile(infile);
    for f in [1..#families] do
-      brd, top := FindOrbits(families[f]);
-      PrintOrbits(families[f], brd, top : file := outfile, label := labels[f]);
+      try
+         brd, top := FindOrbits(families[f]);
+         PrintOrbits(families[f], brd, top : file := outfile, label := labels[f]);
+      catch e
+         PrintFile(outfile, "# " cat labels[f]);
+         PrintFile(outfile, "ERROR: " cat e`Object);
+      end try;
    end for;
 end procedure;

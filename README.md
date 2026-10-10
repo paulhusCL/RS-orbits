@@ -32,8 +32,16 @@ For a signature [0; m_1, ..., m_r] with m_1 <= ... <= m_r:
   (so cone points of the same order may be permuted)
 * **topological**: orbits under Aut(G) together with those braids
 
+The orders in the signature must be in nondecreasing order, as
+`RepresentativesEpimorphisms` expects.
+
 ## Method
-Vectors are compared through a canonical form under simultaneous conjugation.
+Vectors are compared up to simultaneous conjugation without listing the
+elements of G. The first entry is conjugated to a fixed class representative.
+Vectors are then grouped by conjugation invariants (the classes of the entries
+and of products of pairs of entries) and compared with `IsConjugate` in
+successive centralizers. This keeps memory small for large permutation groups.
+
 Braid orbits are found by a breadth-first search over the conjugacy classes of
 generating vectors, using generators of the braid subgroup that preserves the
 signature. A braid move never changes the multiset of conjugacy classes in a
